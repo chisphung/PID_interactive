@@ -239,38 +239,68 @@ const CASES = [
   },
 ] as const;
 
-const BASE_MATRIX = [
-  [0.86, 0.12, 0.43, 0.2],
-  [0.22, 0.76, 0.19, 0.37],
-  [0.31, 0.18, 0.68, 0.41],
-  [0.14, 0.39, 0.25, 0.82],
-];
-const ROW_TARGET = [0.4, 0.3, 0.2, 0.1];
-const COL_TARGET = [0.25, 0.25, 0.3, 0.2];
+const BATCH_LABEL_SLICES = {
+  "0": {
+    label: "y = 0",
+    base: [
+      [0.86, 0.12, 0.43, 0.2],
+      [0.22, 0.76, 0.19, 0.37],
+      [0.31, 0.18, 0.68, 0.41],
+      [0.14, 0.39, 0.25, 0.82],
+    ],
+    rowTarget: [0.4, 0.3, 0.2, 0.1],
+    colTarget: [0.25, 0.25, 0.3, 0.2],
+  },
+  "1": {
+    label: "y = 1",
+    base: [
+      [0.18, 0.72, 0.28, 0.46],
+      [0.62, 0.16, 0.53, 0.2],
+      [0.34, 0.48, 0.21, 0.78],
+      [0.57, 0.25, 0.69, 0.12],
+    ],
+    rowTarget: [0.12, 0.18, 0.3, 0.4],
+    colTarget: [0.36, 0.24, 0.22, 0.18],
+  },
+} as const;
 
-function sumAtoms(values: Record<AtomKey, number>): number {
-  return Object.values(values).reduce<number>((sum, value) => sum + value, 0);
-}
+type BatchLabelKey = keyof typeof BATCH_LABEL_SLICES;
 
-function runSinkhorn(iterations: number) {
-  const matrix = BASE_MATRIX.map((row) => [...row]);
-  for (let step = 0; step < iterations; step += 1) {
-    for (let i = 0; i < matrix.length; i += 1) {
-      const total = matrix[i].reduce((a, b) => a + b, 0);
-      const scale = ROW_TARGET[i] / total;
-      matrix[i] = matrix[i].map((value) => value * scale);
-    }
-    for (let j = 0; j < matrix[0].length; j += 1) {
-      const total = matrix.reduce((sum, row) => sum + row[j], 0);
-      const scale = COL_TARGET[j] / total;
-      for (let i = 0; i < matrix.length; i += 1) matrix[i][j] *= scale;
+const BATCH_STEPS = [
+  { id: "sample", number: "01", title: "Sample a batch", output: "m paired examples" },
+  { id: "score", number: "02", title: "Score cross-pairs", output: "A ∈ ℝᵐˣᵐˣ|Y|" },
+  { id: "project", number: "03", title: "Project to Δp", output: "q̃ = Sinkhorn(A)" },
+  { id: "optimize", number: "04", title: "Update φ", output: "maximize co-information" },
+  { id: "extract", number: "05", title: "Extract atoms", output: "R · U₁ · U₂ · S" },
+] as const;
+
+function runSinkhornPhases(
+  base: readonly (readonly number[])[],
+  rowTarget: readonly number[],
+  colTarget: readonly number[],
+  phases: number,
+) {
+  const matrix = base.map((row) => [...row]);
+  for (let step = 0; step < phases; step += 1) {
+    if (step % 2 === 0) {
+      for (let i = 0; i < matrix.length; i += 1) {
+        const total = matrix[i].reduce((a, b) => a + b, 0);
+        const scale = rowTarget[i] / total;
+        matrix[i] = matrix[i].map((value) => value * scale);
+      }
+    } else {
+      for (let j = 0; j < matrix[0].length; j += 1) {
+        const total = matrix.reduce((sum, row) => sum + row[j], 0);
+        const scale = colTarget[j] / total;
+        for (let i = 0; i < matrix.length; i += 1) matrix[i][j] *= scale;
+      }
     }
   }
   const rowSums = matrix.map((row) => row.reduce((a, b) => a + b, 0));
   const colSums = matrix[0].map((_, j) => matrix.reduce((sum, row) => sum + row[j], 0));
   const error = Math.max(
-    ...rowSums.map((sum, i) => Math.abs(sum - ROW_TARGET[i])),
-    ...colSums.map((sum, i) => Math.abs(sum - COL_TARGET[i])),
+    ...rowSums.map((sum, i) => Math.abs(sum - rowTarget[i])),
+    ...colSums.map((sum, i) => Math.abs(sum - colTarget[i])),
   );
   return { matrix, rowSums, colSums, error };
 }
@@ -282,7 +312,7 @@ function AtomStrip({
   values: Record<AtomKey, number>;
   showValues?: boolean;
 }) {
-  const total = Math.max(sumAtoms(values), 0.0001);
+  const total = Math.max(Object.values(values).reduce((a, b) => a + b, 0), 0.0001);
   return (
     <div className="atom-strip-wrap" aria-label="PID composition">
       <div className="atom-strip">
@@ -439,64 +469,365 @@ function CouplingLab() {
   );
 }
 
-function SinkhornLab() {
-  const [iterations, setIterations] = useState(0);
-  const result = useMemo(() => runSinkhorn(iterations), [iterations]);
-  const max = Math.max(...result.matrix.flat());
+function BatchMatrix({
+  matrix,
+  selectedCell,
+  onSelect,
+  showMarginals = false,
+  rowTarget,
+  colTarget,
+  rowSums,
+  colSums,
+}: {
+  matrix: readonly (readonly number[])[];
+  selectedCell: [number, number];
+  onSelect: (row: number, column: number) => void;
+  showMarginals?: boolean;
+  rowTarget?: readonly number[];
+  colTarget?: readonly number[];
+  rowSums?: readonly number[];
+  colSums?: readonly number[];
+}) {
+  const max = Math.max(...matrix.flat());
   return (
-    <div className="sinkhorn-lab">
-      <div className="lab-controls sinkhorn-head">
-        <div>
-          <span className="micro-label">INTERACTIVE · ONE LABEL SLICE</span>
-          <h3>Watch Sinkhorn project A toward Δp</h3>
-        </div>
-        <label className="iteration-control">
-          <span>normalization rounds</span>
-          <input
-            type="range"
-            min="0"
-            max="12"
-            value={iterations}
-            onChange={(event) => setIterations(Number(event.target.value))}
-            aria-label="Sinkhorn normalization rounds"
-          />
-          <b>{iterations}</b>
-        </label>
+    <div className={`batch-matrix-frame ${showMarginals ? "with-marginals" : ""}`}>
+      <div className="batch-matrix-corner">A<sub>y</sub></div>
+      <div className="batch-matrix-col-labels">
+        {matrix[0].map((_, index) => <span key={index}>x₂<sup>{index + 1}</sup></span>)}
       </div>
-      <div className="sinkhorn-grid-wrap">
-        <div className="sinkhorn-matrix">
-          {result.matrix.map((row, rowIndex) =>
-            row.map((value, colIndex) => (
-              <div
-                className="sinkhorn-cell"
+      <div className="batch-matrix-row-labels">
+        {matrix.map((_, index) => <span key={index}>x₁<sup>{index + 1}</sup></span>)}
+      </div>
+      <div className="batch-heatmap" role="grid" aria-label="Cross-pair score matrix">
+        {matrix.map((row, rowIndex) =>
+          row.map((value, colIndex) => {
+            const selected = selectedCell[0] === rowIndex && selectedCell[1] === colIndex;
+            return (
+              <button
+                type="button"
+                role="gridcell"
+                aria-label={`Select score for x1 sample ${rowIndex + 1} and x2 sample ${colIndex + 1}: ${value.toFixed(3)}`}
+                aria-selected={selected}
+                className={selected ? "selected" : ""}
                 key={`${rowIndex}-${colIndex}`}
                 style={{ "--heat": value / max } as CSSProperties}
-                title={`row ${rowIndex + 1}, column ${colIndex + 1}: ${value.toFixed(4)}`}
+                onClick={() => onSelect(rowIndex, colIndex)}
               >
                 {value.toFixed(3)}
+              </button>
+            );
+          }),
+        )}
+      </div>
+      {showMarginals && rowTarget && rowSums && (
+        <div className="batch-row-marginals">
+          <b>row sum → p̂(y|x₁)</b>
+          {rowSums.map((sum, index) => {
+            const matched = Math.abs(sum - rowTarget[index]) < 0.004;
+            return <span className={matched ? "matched" : ""} key={index}>{sum.toFixed(3)} → {rowTarget[index].toFixed(2)}</span>;
+          })}
+        </div>
+      )}
+      {showMarginals && colTarget && colSums && (
+        <div className="batch-col-marginals">
+          <b>column sum ↓ p̂(y|x₂)</b>
+          <div>
+            {colSums.map((sum, index) => {
+              const matched = Math.abs(sum - colTarget[index]) < 0.004;
+              return <span className={matched ? "matched" : ""} key={index}>{sum.toFixed(3)}<small>↓ {colTarget[index].toFixed(2)}</small></span>;
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BatchMethodLab() {
+  const [activeStep, setActiveStep] = useState(0);
+  const [labelKey, setLabelKey] = useState<BatchLabelKey>("0");
+  const [selectedCell, setSelectedCell] = useState<[number, number]>([1, 2]);
+  const [projectionPhases, setProjectionPhases] = useState(0);
+  const [trainingStep, setTrainingStep] = useState(0);
+  const [activeReadout, setActiveReadout] = useState<AtomKey>("S");
+  const [jointPredictor, setJointPredictor] = useState<"strong" | "weak">("strong");
+  const slice = BATCH_LABEL_SLICES[labelKey];
+  const projection = useMemo(
+    () => runSinkhornPhases(slice.base, slice.rowTarget, slice.colTarget, projectionPhases),
+    [projectionPhases, slice],
+  );
+  const rowError = Math.max(...projection.rowSums.map((sum, index) => Math.abs(sum - slice.rowTarget[index])));
+  const colError = Math.max(...projection.colSums.map((sum, index) => Math.abs(sum - slice.colTarget[index])));
+  const objective = 0.08 + 0.54 * (1 - Math.exp(-trainingStep / 18));
+  const gradient = 0.7 * Math.exp(-trainingStep / 20) + 0.02;
+  const sourceInformation = {
+    i1: 0.42,
+    i2: 0.35,
+    qJoint: 0.55,
+    pJoint: jointPredictor === "strong" ? 0.8 : 0.66,
+  };
+  const readoutValues: Record<AtomKey, number> = {
+    R: sourceInformation.i1 + sourceInformation.i2 - sourceInformation.qJoint,
+    U1: sourceInformation.qJoint - sourceInformation.i2,
+    U2: sourceInformation.qJoint - sourceInformation.i1,
+    S: sourceInformation.pJoint - sourceInformation.qJoint,
+  };
+  const readoutCopy: Record<AtomKey, { formula: string; reading: string }> = {
+    R: {
+      formula: "Iₚ(X₁;Y) + Iₚ(X₂;Y) − Iq̃(X₁,X₂;Y)",
+      reading: "The overlap left after the least-informative admissible coupling is found.",
+    },
+    U1: {
+      formula: "Iq̃(X₁,X₂;Y) − Iₚ(X₂;Y)",
+      reading: "Joint information under q̃ that cannot be supplied by X₂ alone.",
+    },
+    U2: {
+      formula: "Iq̃(X₁,X₂;Y) − Iₚ(X₁;Y)",
+      reading: "Joint information under q̃ that cannot be supplied by X₁ alone.",
+    },
+    S: {
+      formula: "Iₚ(X₁,X₂;Y) − Iq̃(X₁,X₂;Y)",
+      reading: "The joint information destroyed when the source coupling is rewired.",
+    },
+  };
+  const stageCopy = [
+    {
+      kicker: "OBSERVED DATA",
+      title: "Begin with m paired examples from the dataset.",
+      body: "The diagonal pairs are observed together. Frozen unimodal classifiers turn each continuous sample into the marginal targets p̂(y|x₁) and p̂(y|x₂) that BATCH must preserve.",
+      equation: "Dₜ = {(x₁ⁱ, x₂ⁱ, yⁱ)}ᵢ₌₁ᵐ",
+    },
+    {
+      kicker: "NEURAL PARAMETERIZATION",
+      title: "Score every possible cross-pair inside the batch.",
+      body: "Two label-conditioned encoders map all x₁ rows and x₂ columns into a shared space. Their outer-product similarity creates one positive m × m score matrix for every label—not just the observed diagonal.",
+      equation: "Aᵧ = exp(fφ¹(X₁,y) fφ²(X₂,y)ᵀ)",
+    },
+    {
+      kicker: "DIFFERENTIABLE CONSTRAINT",
+      title: "Alternate row and column rescaling until both marginals match.",
+      body: "A is positive but not yet a valid member of Δp. Unrolled Sinkhorn repeatedly matches rows to p̂(y|x₁) and columns to p̂(y|x₂). Each pass disturbs the other axis less, so the error converges toward zero.",
+      equation: "q̃ = Sinkhornₚ̂(A) ∈ Δp",
+    },
+    {
+      kicker: "PROJECTED GRADIENT STEP",
+      title: "Backpropagate through the projection—update only φ.",
+      body: "The paper maximizes co-information Iq̃(X₁;X₂;Y). With source–target marginals fixed, this is equivalent to minimizing Iq̃(X₁,X₂;Y). Sinkhorn has no learned weights, but it remains in the gradient path.",
+      equation: "maxφ Iq̃(X₁;X₂;Y)  ⇔  minφ Iq̃(X₁,X₂;Y)",
+    },
+    {
+      kicker: "PID READOUT",
+      title: "After convergence, combine q̃ with information measured under p.",
+      body: "The optimized coupling supplies Iq̃(X₁,X₂;Y). The frozen unimodal models supply the two single-source terms, and a separately trained multimodal predictor supplies total joint information under p.",
+      equation: "q̃ → {R, U₁, U₂, S}",
+    },
+  ] as const;
+  const stage = stageCopy[activeStep];
+  const selectedScore = slice.base[selectedCell[0]][selectedCell[1]];
+  const selectedProjected = projection.matrix[selectedCell[0]][selectedCell[1]];
+  const observedPair = selectedCell[0] === selectedCell[1];
+  const nextProjection = projectionPhases % 2 === 0 ? "Scale rows" : "Scale columns";
+
+  const selectLabel = (key: BatchLabelKey) => {
+    setLabelKey(key);
+    setProjectionPhases(0);
+  };
+
+  return (
+    <div className="batch-method-lab">
+      <div className="batch-lab-header">
+        <div>
+          <span className="micro-label">INTERACTIVE METHOD WALKTHROUGH</span>
+          <h3>Follow one BATCH gradient step</h3>
+          <p>Choose a stage, then manipulate the toy batch. The numbers are illustrative; the operations mirror the estimator.</p>
+        </div>
+        <div className="batch-label-switch" role="group" aria-label="Choose label slice">
+          <span>label slice</span>
+          {(Object.keys(BATCH_LABEL_SLICES) as BatchLabelKey[]).map((key) => (
+            <button
+              type="button"
+              className={labelKey === key ? "selected" : ""}
+              aria-pressed={labelKey === key}
+              key={key}
+              onClick={() => selectLabel(key)}
+            >
+              y = {key}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="batch-step-tabs" role="tablist" aria-label="BATCH estimator stages">
+        {BATCH_STEPS.map((item, index) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeStep === index}
+            className={activeStep === index ? "selected" : ""}
+            key={item.id}
+            onClick={() => setActiveStep(index)}
+          >
+            <span>{item.number}</span>
+            <b>{item.title}</b>
+            <small>{item.output}</small>
+          </button>
+        ))}
+      </div>
+
+      <div className="batch-stage-panel">
+        <div className="batch-stage-copy">
+          <span>{stage.kicker}</span>
+          <h4>{stage.title}</h4>
+          <p>{stage.body}</p>
+          <div className="batch-stage-equation">{stage.equation}</div>
+          <div className="batch-stage-nav">
+            <button type="button" disabled={activeStep === 0} onClick={() => setActiveStep((step) => Math.max(0, step - 1))}>← Previous</button>
+            <span>{activeStep + 1} / {BATCH_STEPS.length}</span>
+            <button type="button" disabled={activeStep === BATCH_STEPS.length - 1} onClick={() => setActiveStep((step) => Math.min(BATCH_STEPS.length - 1, step + 1))}>Next →</button>
+          </div>
+        </div>
+
+        <div className="batch-stage-visual">
+          {activeStep === 0 && (
+            <div className="batch-sample-visual">
+              <div className="sample-table-head"><span>i</span><span>source X₁</span><span>observed pair</span><span>source X₂</span></div>
+              {[0, 1, 2, 3].map((index) => (
+                <div className="batch-sample-row" key={index}>
+                  <span className="sample-index">{index + 1}</span>
+                  <div className="sample-source blue">
+                    <b>x₁<sup>{index + 1}</sup></b>
+                    <div><i style={{ width: `${slice.rowTarget[index] * 100}%` }} /></div>
+                    <small>p̂({slice.label}|x₁) = {slice.rowTarget[index].toFixed(2)}</small>
+                  </div>
+                  <div className="observed-pair"><i /><b>y<sup>{index + 1}</sup> = {index % 2}</b><i /></div>
+                  <div className="sample-source amber">
+                    <b>x₂<sup>{index + 1}</sup></b>
+                    <div><i style={{ width: `${slice.colTarget[index] * 100}%` }} /></div>
+                    <small>p̂({slice.label}|x₂) = {slice.colTarget[index].toFixed(2)}</small>
+                  </div>
+                </div>
+              ))}
+              <p className="visual-caption"><b>Key move:</b> the dataset supplies four diagonal pairs; the next stage constructs all 4 × 4 possible couplings for each y.</p>
+            </div>
+          )}
+
+          {activeStep === 1 && (
+            <div className="batch-score-visual">
+              <div className="encoder-pair">
+                <div><span>TRAINABLE</span><b>fφ¹(X₁, {slice.label})</b><small>one row embedding per x₁ sample</small></div>
+                <i>outer product</i>
+                <div><span>TRAINABLE</span><b>fφ²(X₂, {slice.label})</b><small>one column embedding per x₂ sample</small></div>
               </div>
-            )),
+              <BatchMatrix matrix={slice.base} selectedCell={selectedCell} onSelect={(row, column) => setSelectedCell([row, column])} />
+              <div className="selected-score-card">
+                <span>{observedPair ? "OBSERVED DIAGONAL PAIR" : "COUNTERFACTUAL CROSS-PAIR"}</span>
+                <b>A[{selectedCell[0] + 1},{selectedCell[1] + 1},{labelKey}] = exp(〈h₁,h₂〉) = {selectedScore.toFixed(3)}</b>
+                <p>{observedPair ? "This x₁ and x₂ arrived together in the dataset." : "These samples did not arrive together; BATCH is testing this alternative coupling."} Select any cell to inspect it.</p>
+              </div>
+            </div>
+          )}
+
+          {activeStep === 2 && (
+            <div className="batch-projection-visual">
+              <BatchMatrix
+                matrix={projection.matrix}
+                selectedCell={selectedCell}
+                onSelect={(row, column) => setSelectedCell([row, column])}
+                showMarginals
+                rowTarget={slice.rowTarget}
+                colTarget={slice.colTarget}
+                rowSums={projection.rowSums}
+                colSums={projection.colSums}
+              />
+              <div className="projection-console">
+                <div className="projection-actions">
+                  <button type="button" onClick={() => setProjectionPhases(0)}>Reset A</button>
+                  <button type="button" className="primary" onClick={() => setProjectionPhases((value) => Math.min(12, value + 1))}>{nextProjection} →</button>
+                  <button type="button" onClick={() => setProjectionPhases(12)}>Run to convergence</button>
+                </div>
+                <div className="projection-errors">
+                  <div className={rowError < 0.004 ? "matched" : ""}><span>row error</span><b>{rowError.toExponential(1)}</b></div>
+                  <div className={colError < 0.004 ? "matched" : ""}><span>column error</span><b>{colError.toExponential(1)}</b></div>
+                  <div><span>selected q̃ cell</span><b>{selectedProjected.toFixed(4)}</b></div>
+                  <div><span>half-steps</span><b>{projectionPhases}</b></div>
+                </div>
+                <div className="projection-track"><i style={{ width: `${Math.max(2, 100 - Math.min(projection.error * 320, 98))}%` }} /></div>
+                <p>After a row pass, the rows match exactly but columns drift; the column pass reverses that. Alternation converges to both constraints at once.</p>
+              </div>
+            </div>
+          )}
+
+          {activeStep === 3 && (
+            <div className="batch-optimization-visual">
+              <div className="gradient-loop" aria-label="Differentiable BATCH optimization loop">
+                <div className="trainable"><span>UPDATE</span><b>φ</b><small>encoder weights</small></div><i>→</i>
+                <div className="trainable"><span>BUILD</span><b>A</b><small>cross-pair scores</small></div><i>→</i>
+                <div className="fixed"><span>PROJECT</span><b>Sinkhorn</b><small>fixed · differentiable</small></div><i>→</i>
+                <div className="distribution"><span>VALID</span><b>q̃ ∈ Δp</b><small>marginals preserved</small></div><i>→</i>
+                <div className="objective"><span>MAXIMIZE</span><b>Iq̃(X₁;X₂;Y)</b><small>send ∂ objective / ∂φ back</small></div>
+              </div>
+              <label className="training-scrubber">
+                <span>illustrative optimization progress</span>
+                <input type="range" min="0" max="60" value={trainingStep} onChange={(event) => setTrainingStep(Number(event.target.value))} aria-label="Illustrative BATCH optimization step" />
+                <b>step {trainingStep}</b>
+              </label>
+              <div className="training-readouts">
+                <div><span>co-information objective ↑</span><b>{objective.toFixed(3)} bits</b><div><i style={{ width: `${(objective / 0.64) * 100}%` }} /></div></div>
+                <div><span>gradient magnitude ↓</span><b>{gradient.toFixed(3)}</b><div><i style={{ width: `${(gradient / 0.72) * 100}%` }} /></div></div>
+                <div><span>marginal constraint</span><b>re-projected every step</b><div><i className="full" /></div></div>
+              </div>
+              <p className="visual-caption"><b>Amortization:</b> every iteration samples a new Dₜ. The same φ is reused across batches, so the neural parameterization carries what was learned beyond any single m × m matrix.</p>
+            </div>
+          )}
+
+          {activeStep === 4 && (
+            <div className="batch-extraction-visual">
+              <div className="joint-predictor-switch">
+                <div><span>MULTIMODAL PREDICTOR</span><b>See why only synergy moves</b></div>
+                <div role="group" aria-label="Choose multimodal predictor quality">
+                  <button type="button" className={jointPredictor === "strong" ? "selected" : ""} aria-pressed={jointPredictor === "strong"} onClick={() => setJointPredictor("strong")}>strong</button>
+                  <button type="button" className={jointPredictor === "weak" ? "selected" : ""} aria-pressed={jointPredictor === "weak"} onClick={() => setJointPredictor("weak")}>weak</button>
+                </div>
+              </div>
+              <div className="information-ingredients">
+                <div className="frozen"><span>FIXED FROM X₁</span><b>Iₚ(X₁;Y)</b><strong>{sourceInformation.i1.toFixed(2)}</strong></div>
+                <div className="frozen"><span>FIXED FROM X₂</span><b>Iₚ(X₂;Y)</b><strong>{sourceInformation.i2.toFixed(2)}</strong></div>
+                <div className="learned"><span>LEARNED q̃</span><b>Iq̃(X₁,X₂;Y)</b><strong>{sourceInformation.qJoint.toFixed(2)}</strong></div>
+                <div className={jointPredictor === "strong" ? "joint" : "joint weak"}><span>{jointPredictor.toUpperCase()} JOINT MODEL</span><b>Iₚ(X₁,X₂;Y)</b><strong>{sourceInformation.pJoint.toFixed(2)}</strong></div>
+              </div>
+              <AtomStrip values={readoutValues} />
+              <div className="atom-readout-tabs" role="tablist" aria-label="PID atom extraction formulas">
+                {(Object.keys(ATOMS) as AtomKey[]).map((key) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeReadout === key}
+                    className={activeReadout === key ? "selected" : ""}
+                    style={{ "--atom-color": ATOMS[key].color } as CSSProperties}
+                    key={key}
+                    onClick={() => setActiveReadout(key)}
+                  >
+                    <span>{ATOMS[key].symbol}</span><b>{readoutValues[key].toFixed(2)}</b><small>{ATOMS[key].name}</small>
+                  </button>
+                ))}
+              </div>
+              <div className="atom-formula-readout" style={{ "--atom-color": ATOMS[activeReadout].color } as CSSProperties}>
+                <span>{ATOMS[activeReadout].name}</span>
+                <b>{readoutCopy[activeReadout].formula} = {readoutValues[activeReadout].toFixed(2)}</b>
+                <p>{readoutCopy[activeReadout].reading}</p>
+              </div>
+              <p className="visual-caption"><b>Try the weak joint model:</b> R, U₁, and U₂ stay fixed because they use q̃ and the unimodal terms. S falls because its Iₚ(X₁,X₂;Y) estimate is now too small.</p>
+            </div>
           )}
         </div>
-        <div className="sinkhorn-sums row-sums">
-          {result.rowSums.map((sum, index) => (
-            <div key={index}><span>{sum.toFixed(3)}</span><em>→ {ROW_TARGET[index].toFixed(2)}</em></div>
-          ))}
-        </div>
-        <div className="sinkhorn-sums col-sums">
-          {result.colSums.map((sum, index) => (
-            <div key={index}><span>{sum.toFixed(3)}</span><em>↓ {COL_TARGET[index].toFixed(2)}</em></div>
-          ))}
-        </div>
       </div>
-      <div className="error-readout">
-        <span>maximum marginal error</span>
-        <strong>{result.error.toExponential(2)}</strong>
-        <div className="error-track"><i style={{ width: `${Math.min(result.error * 420, 100)}%` }} /></div>
+
+      <div className="batch-status-legend">
+        <span className="frozen"><i />FROZEN · p̂(y|x₁), p̂(y|x₂)</span>
+        <span className="trainable"><i />TRAINABLE · fφ¹, fφ²</span>
+        <span className="fixed"><i />FIXED BUT DIFFERENTIABLE · Sinkhorn</span>
+        <span className="separate"><i />TRAINED SEPARATELY · p̂(y|x₁,x₂)</span>
       </div>
-      <p className="figure-note">
-        This small matrix is pedagogical. In BATCH, A has shape m × m × |Y|, and normalization targets come from frozen unimodal predictions p̂(y|xᵢ).
-      </p>
     </div>
   );
 }
@@ -504,7 +835,7 @@ function SinkhornLab() {
 function DatasetExplorer() {
   const [selectedId, setSelectedId] = useState("clevr");
   const dataset = DATASETS.find((item) => item.id === selectedId) ?? DATASETS[0];
-  const total = sumAtoms(dataset.values);
+  const total = Object.values(dataset.values).reduce((a, b) => a + b, 0);
   return (
     <div className="dataset-explorer">
       <div className="dataset-list" role="list" aria-label="Real-world datasets">
@@ -913,26 +1244,16 @@ export default function Home() {
               <div className="chapter-title">
                 <span>3.2</span><div><p>ESTIMATOR TWO</p><h3>BATCH: learn q without enumerating it</h3></div>
               </div>
-              <div className="batch-pipeline" aria-label="BATCH estimator pipeline">
-                <div className="pipeline-node inputs"><span>minibatch</span><b>X₁, X₂, Y</b><small>m ≪ n</small></div>
-                <span className="pipeline-arrow">→</span>
-                <div className="pipeline-node encoders"><span>trainable</span><b>fφ¹, fφ²</b><small>label-conditioned encoders</small></div>
-                <span className="pipeline-arrow">→</span>
-                <div className="pipeline-node matrix"><span>positive scores</span><b>A<sub>y</sub> = exp(h₁h₂ᵀ)</b><small>m × m × |Y|</small></div>
-                <span className="pipeline-arrow">→</span>
-                <div className="pipeline-node projection"><span>projection</span><b>Sinkhorn<sub>p̂</sub>(A)</b><small>q̃ ∈ Δp</small></div>
-                <span className="pipeline-arrow">→</span>
-                <div className="pipeline-node objective"><span>optimize</span><b>min I<sub>q̃</sub>(X₁,X₂;Y)</b><small>backpropagate through Sinkhorn</small></div>
-              </div>
+              <p className="batch-chapter-intro">BATCH is easiest to understand as a projected training loop, not a one-way pipeline. The workbench below follows one minibatch from observed pairs to a constrained coupling, then shows which quantities are reused to recover the four atoms.</p>
 
-              <SinkhornLab />
+              <BatchMethodLab />
 
               <div className="training-ledger">
                 <div className="ledger-head"><span>COMPONENT</span><span>ROLE</span><span>STATUS</span></div>
                 <div><b>Unimodal predictors p̂(y|x₁), p̂(y|x₂)</b><p>Supply the row and column targets that approximate p(xᵢ,y).</p><em className="frozen">TRAIN FIRST · FREEZE</em></div>
                 <div><b>Encoders fφ¹ and fφ²</b><p>Produce label-conditioned embeddings whose outer products parameterize A.</p><em className="trained">TRAINED BY PID OBJECTIVE</em></div>
                 <div><b>Unrolled Sinkhorn</b><p>Projects A onto the marginal constraints and passes gradients.</p><em className="fixed">FIXED ALGORITHM</em></div>
-                <div><b>Multimodal predictor p̂(y|x₁,x₂)</b><p>Estimates total I<sub>p</sub>(X₁,X₂;Y), needed when extracting synergy.</p><em className="frozen">TRAIN SEPARATELY</em></div>
+                <div><b>Multimodal predictor p̂(y|x₁,x₂)</b><p>Estimates total I<sub>p</sub>(X₁,X₂;Y), needed when extracting synergy.</p><em className="separate">TRAIN SEPARATELY</em></div>
               </div>
 
               <div className="insight-callout teal-callout">

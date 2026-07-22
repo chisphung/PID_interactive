@@ -248,6 +248,10 @@ const BASE_MATRIX = [
 const ROW_TARGET = [0.4, 0.3, 0.2, 0.1];
 const COL_TARGET = [0.25, 0.25, 0.3, 0.2];
 
+function sumAtoms(values: Record<AtomKey, number>): number {
+  return Object.values(values).reduce<number>((sum, value) => sum + value, 0);
+}
+
 function runSinkhorn(iterations: number) {
   const matrix = BASE_MATRIX.map((row) => [...row]);
   for (let step = 0; step < iterations; step += 1) {
@@ -278,7 +282,7 @@ function AtomStrip({
   values: Record<AtomKey, number>;
   showValues?: boolean;
 }) {
-  const total = Math.max(Object.values(values).reduce((a, b) => a + b, 0), 0.0001);
+  const total = Math.max(sumAtoms(values), 0.0001);
   return (
     <div className="atom-strip-wrap" aria-label="PID composition">
       <div className="atom-strip">
@@ -500,7 +504,7 @@ function SinkhornLab() {
 function DatasetExplorer() {
   const [selectedId, setSelectedId] = useState("clevr");
   const dataset = DATASETS.find((item) => item.id === selectedId) ?? DATASETS[0];
-  const total = Object.values(dataset.values).reduce((a, b) => a + b, 0);
+  const total = sumAtoms(dataset.values);
   return (
     <div className="dataset-explorer">
       <div className="dataset-list" role="list" aria-label="Real-world datasets">

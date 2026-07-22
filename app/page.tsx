@@ -835,7 +835,7 @@ function BatchMethodLab() {
 function DatasetExplorer() {
   const [selectedId, setSelectedId] = useState("clevr");
   const dataset = DATASETS.find((item) => item.id === selectedId) ?? DATASETS[0];
-  const total = Object.values(dataset.values).reduce((a, b) => a + b, 0);
+  const total = Object.values(dataset.values).reduce<number>((a, b) => a + b, 0);
   return (
     <div className="dataset-explorer">
       <div className="dataset-list" role="list" aria-label="Real-world datasets">
